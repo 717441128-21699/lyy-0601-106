@@ -331,6 +331,8 @@ export interface Split extends BaseEntity {
   status: SplitStatus;
   dueDate?: number;
   isSettlement?: boolean;
+  discrepancy?: number;
+  discrepancyNote?: string;
 }
 
 export interface CreateSplitInput {
@@ -598,6 +600,11 @@ export interface AccountCashflowSummary {
   netAmount: number;
   incomeByCategory: CategoryBreakdownItem[];
   expenseByCategory: CategoryBreakdownItem[];
+  transferInTotal: number;
+  transferOutTotal: number;
+  refundTotal: number;
+  transferInCount: number;
+  transferOutCount: number;
 }
 
 export interface GoalDimensionReport {

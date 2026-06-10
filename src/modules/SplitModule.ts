@@ -38,7 +38,7 @@ export class SplitModule {
       throw new Error('必须指定付款人');
     }
 
-    const participants = this.calculateShares(
+    const { participants, discrepancy, discrepancyNote } = this.calculateShares(
       input.totalAmount,
       input.participants
     );
@@ -60,6 +60,8 @@ export class SplitModule {
         : 'pending',
       dueDate: input.dueDate,
       isSettlement: input.isSettlement ?? false,
+      discrepancy,
+      discrepancyNote,
     };
 
     this.storage.splits.set(split.id, split);
@@ -69,7 +71,7 @@ export class SplitModule {
   private calculateShares(
     totalAmount: number,
     participants: CreateSplitInput['participants']
-  ): Participant[] {
+  ): { participants: Participant[]; discrepancy?: number; discrepancyNote?: string } {
     const count = participants.length;
     const result: Participant[] = [];
     let allocated = 0;
@@ -87,11 +89,7 @@ export class SplitModule {
           }
           break;
         case 'percentage':
-          if (isLast) {
-            amount = roundAmount(totalAmount - allocated);
-          } else {
-            amount = roundAmount(totalAmount * ((p.shareValue ?? 0) / 100));
-          }
+          amount = roundAmount(totalAmount * ((p.shareValue ?? 0) / 100));
           break;
         case 'fixed':
           amount = roundAmount(p.shareValue ?? 0);
@@ -112,7 +110,19 @@ export class SplitModule {
       });
     });
 
-    return result;
+    let discrepancy: number | undefined;
+    let discrepancyNote: string | undefined;
+    const diff = roundAmount(totalAmount - allocated);
+    if (Math.abs(diff) > 0.005) {
+      discrepancy = diff;
+      if (diff > 0) {
+        discrepancyNote = `各人分摊金额合计 ¥${roundAmount(allocated)}，比总金额 ¥${totalAmount} 少 ¥${diff}，请确认比例是否正确或补充差额`;
+      } else {
+        discrepancyNote = `各人分摊金额合计 ¥${roundAmount(allocated)}，比总金额 ¥${totalAmount} 多 ¥${Math.abs(diff)}，请确认比例是否正确`;
+      }
+    }
+
+    return { participants: result, discrepancy, discrepancyNote };
   }
 
   createEqualSplit(input: {
@@ -432,6 +442,7 @@ export class SplitModule {
   ): TransferSuggestion[] {
     const netBalances = new Map<ID, number>();
     const userNames = new Map<ID, string | undefined>();
+    const rawDebts: SplitDebtRelation[] = [];
 
     splits.forEach((split) => {
       split.participants.forEach((p) => {
@@ -439,10 +450,21 @@ export class SplitModule {
         if (!netBalances.has(p.userId)) netBalances.set(p.userId, 0);
 
         const remaining = roundAmount(p.amount - p.paidAmount);
+        if (remaining < 0.01) return;
+
         if (p.userId === split.paidBy) {
           netBalances.set(p.userId, (netBalances.get(p.userId) ?? 0) + remaining);
         } else {
           netBalances.set(p.userId, (netBalances.get(p.userId) ?? 0) - remaining);
+          rawDebts.push({
+            fromUserId: p.userId,
+            fromUserName: p.userName,
+            toUserId: split.paidBy,
+            toUserName: split.participants.find((pp) => pp.userId === split.paidBy)?.userName,
+            amount: remaining,
+            splitIds: [split.id],
+            splitNames: [split.name],
+          });
         }
       });
     });
@@ -472,25 +494,31 @@ export class SplitModule {
       const transferAmount = roundAmount(Math.min(debtor.amount, creditor.amount));
 
       if (transferAmount > 0.01) {
-        const relatedDebts: SplitDebtRelation[] = [];
-        splits.forEach((split) => {
-          const debtorP = split.participants.find((p) => p.userId === debtor.userId);
-          const creditorP = split.participants.find((p) => p.userId === creditor.userId);
-          if (debtorP && creditorP && split.paidBy === creditor.userId) {
-            const remaining = roundAmount(debtorP.amount - debtorP.paidAmount);
-            if (remaining > 0.01) {
-              relatedDebts.push({
-                fromUserId: debtor.userId,
-                fromUserName: userNames.get(debtor.userId),
-                toUserId: creditor.userId,
-                toUserName: userNames.get(creditor.userId),
-                amount: Math.min(remaining, transferAmount),
-                splitIds: [split.id],
-                splitNames: [split.name],
-              });
-            }
-          }
+        const related = rawDebts.filter(
+          (d) => d.fromUserId === debtor.userId && d.toUserId === creditor.userId
+        );
+
+        let allocatedFromRelated = 0;
+        const mappedDebts: SplitDebtRelation[] = related.map((d) => {
+          const alloc = Math.min(d.amount, transferAmount - allocatedFromRelated);
+          allocatedFromRelated += alloc;
+          return {
+            ...d,
+            amount: roundAmount(alloc),
+          };
         });
+
+        if (allocatedFromRelated < transferAmount - 0.01) {
+          mappedDebts.push({
+            fromUserId: debtor.userId,
+            fromUserName: userNames.get(debtor.userId),
+            toUserId: creditor.userId,
+            toUserName: userNames.get(creditor.userId),
+            amount: roundAmount(transferAmount - allocatedFromRelated),
+            splitIds: [],
+            splitNames: [],
+          });
+        }
 
         suggestions.push({
           fromUserId: debtor.userId,
@@ -498,16 +526,8 @@ export class SplitModule {
           toUserId: creditor.userId,
           toUserName: userNames.get(creditor.userId),
           amount: transferAmount,
-          isConsolidated: relatedDebts.length > 1 || transferAmount !== relatedDebts[0]?.amount,
-          relatedDebts: relatedDebts.length > 0 ? relatedDebts : [{
-            fromUserId: debtor.userId,
-            fromUserName: userNames.get(debtor.userId),
-            toUserId: creditor.userId,
-            toUserName: userNames.get(creditor.userId),
-            amount: transferAmount,
-            splitIds: [],
-            splitNames: [],
-          }],
+          isConsolidated: mappedDebts.length > 1,
+          relatedDebts: mappedDebts,
         });
       }
 

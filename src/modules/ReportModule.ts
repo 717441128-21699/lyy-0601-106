@@ -67,6 +67,51 @@ export class ReportModule {
     this.reminders = reminders;
   }
 
+  private txEffectOnAccount(tx: Transaction, accountId: ID): number {
+    switch (tx.type) {
+      case 'income':
+        return tx.accountId === accountId ? tx.amount : 0;
+      case 'expense':
+        return tx.accountId === accountId ? -tx.amount : 0;
+      case 'transfer':
+        if (tx.accountId === accountId) return -tx.amount;
+        if (tx.toAccountId === accountId) return tx.amount;
+        return 0;
+      case 'refund':
+        return tx.accountId === accountId ? tx.amount : 0;
+      default:
+        return 0;
+    }
+  }
+
+  private txEffectOnAccounts(tx: Transaction, accountIds: ID[] | undefined): number {
+    if (!accountIds || accountIds.length === 0) {
+      switch (tx.type) {
+        case 'income': return tx.amount;
+        case 'expense': return -tx.amount;
+        default: return 0;
+      }
+    }
+    let effect = 0;
+    for (const aid of accountIds) {
+      effect += this.txEffectOnAccount(tx, aid);
+    }
+    return effect;
+  }
+
+  private isIncomeForAccount(tx: Transaction, accountId: ID): boolean {
+    if (tx.type === 'income' && tx.accountId === accountId) return true;
+    if (tx.type === 'transfer' && tx.toAccountId === accountId) return true;
+    if (tx.type === 'refund' && tx.accountId === accountId) return true;
+    return false;
+  }
+
+  private isExpenseForAccount(tx: Transaction, accountId: ID): boolean {
+    if (tx.type === 'expense' && tx.accountId === accountId) return true;
+    if (tx.type === 'transfer' && tx.accountId === accountId) return true;
+    return false;
+  }
+
   getCategoryBreakdown(config: ReportConfig): CategoryBreakdown {
     const { startDate, endDate } = this.getDateRange(config);
     const txs = this.transactions.listInDateRange(
@@ -161,24 +206,19 @@ export class ReportModule {
       config.accountIds
     );
 
-    const currentBalance = this.accounts.getTotalBalance(
-      config.userId,
-      undefined
-    );
+    const filteredAccountIds = config.accountIds;
 
-    const periodNet = sumBy(txs, (t) => {
-      if (t.type === 'income') return t.amount;
-      if (t.type === 'expense') return -t.amount;
-      if (t.type === 'transfer' && config.accountIds && config.accountIds.length > 0) {
-        const isFrom = config.accountIds.includes(t.accountId);
-        const isTo = t.toAccountId ? config.accountIds.includes(t.toAccountId) : false;
-        if (isFrom && !isTo) return -t.amount;
-        if (!isFrom && isTo) return t.amount;
-        return 0;
-      }
-      return 0;
-    });
+    let currentBalance: number;
+    if (filteredAccountIds && filteredAccountIds.length > 0) {
+      currentBalance = filteredAccountIds.reduce((sum, aid) => {
+        const acc = this.accounts.getById(aid);
+        return sum + (acc ? acc.balance : 0);
+      }, 0);
+    } else {
+      currentBalance = this.accounts.getTotalBalance(config.userId);
+    }
 
+    const periodNet = sumBy(txs, (t) => this.txEffectOnAccounts(t, filteredAccountIds));
     const openingBalance = roundAmount(currentBalance - periodNet);
 
     const points: CashflowPoint[] = [];
@@ -191,37 +231,65 @@ export class ReportModule {
       const periodEnd = currentPoint + stepMs - 1;
       const periodTxs = txs.filter((t) => t.date >= currentPoint && t.date <= periodEnd);
 
-      const income = sumBy(
-        periodTxs.filter((t) => t.type === 'income'),
-        (t) => t.amount
-      );
-      const expense = sumBy(
-        periodTxs.filter((t) => t.type === 'expense'),
-        (t) => t.amount
-      );
+      let periodIncome = 0;
+      let periodExpense = 0;
 
-      runningBalance += income - expense;
+      if (filteredAccountIds && filteredAccountIds.length > 0) {
+        for (const tx of periodTxs) {
+          for (const aid of filteredAccountIds) {
+            if (this.isIncomeForAccount(tx, aid)) periodIncome += tx.amount;
+            if (this.isExpenseForAccount(tx, aid)) periodExpense += tx.amount;
+          }
+        }
+      } else {
+        periodIncome = sumBy(
+          periodTxs.filter((t) => t.type === 'income'),
+          (t) => t.amount
+        );
+        periodExpense = sumBy(
+          periodTxs.filter((t) => t.type === 'expense'),
+          (t) => t.amount
+        );
+      }
+
+      const periodNetChange = sumBy(periodTxs, (t) => this.txEffectOnAccounts(t, filteredAccountIds));
+      runningBalance += periodNetChange;
 
       points.push({
         date: formatDate(currentPoint, granularity === 'monthly' ? 'yyyy-MM' : 'yyyy-MM-dd'),
         timestamp: currentPoint,
-        income: roundAmount(income),
-        expense: roundAmount(expense),
-        net: roundAmount(income - expense),
+        income: roundAmount(periodIncome),
+        expense: roundAmount(periodExpense),
+        net: roundAmount(periodNetChange),
         balance: roundAmount(openingBalance + runningBalance),
       });
 
       currentPoint += stepMs;
     }
 
-    const totalIncome = sumBy(
-      txs.filter((t) => t.type === 'income'),
-      (t) => t.amount
-    );
-    const totalExpense = sumBy(
-      txs.filter((t) => t.type === 'expense'),
-      (t) => t.amount
-    );
+    let totalIncome: number;
+    let totalExpense: number;
+
+    if (filteredAccountIds && filteredAccountIds.length > 0) {
+      totalIncome = 0;
+      totalExpense = 0;
+      for (const tx of txs) {
+        for (const aid of filteredAccountIds) {
+          if (this.isIncomeForAccount(tx, aid)) totalIncome += tx.amount;
+          if (this.isExpenseForAccount(tx, aid)) totalExpense += tx.amount;
+        }
+      }
+    } else {
+      totalIncome = sumBy(
+        txs.filter((t) => t.type === 'income'),
+        (t) => t.amount
+      );
+      totalExpense = sumBy(
+        txs.filter((t) => t.type === 'expense'),
+        (t) => t.amount
+      );
+    }
+
     const totalDays = Math.max(1, daysBetween(startDate, endDate) + 1);
 
     return {
@@ -231,7 +299,7 @@ export class ReportModule {
       points,
       totalIncome: roundAmount(totalIncome),
       totalExpense: roundAmount(totalExpense),
-      netAmount: roundAmount(totalIncome - totalExpense),
+      netAmount: roundAmount(periodNet),
       averageDailyIncome: roundAmount(totalIncome / totalDays),
       averageDailyExpense: roundAmount(totalExpense / totalDays),
     };
@@ -460,18 +528,29 @@ export class ReportModule {
     const start = startDate ?? addDays(end, -30).getTime();
 
     const txs = this.transactions.listInDateRange(userId, start, end, [accountId]);
-    const incomeTxs = txs.filter((t) => t.type === 'income');
-    const expenseTxs = txs.filter((t) => t.type === 'expense');
+
+    const incomeTxs = txs.filter((t) => this.isIncomeForAccount(t, accountId));
+    const expenseTxs = txs.filter((t) => this.isExpenseForAccount(t, accountId));
 
     const totalIncome = sumBy(incomeTxs, (t) => t.amount);
     const totalExpense = sumBy(expenseTxs, (t) => t.amount);
 
-    const periodNet = totalIncome - totalExpense;
+    const periodNet = sumBy(txs, (t) => this.txEffectOnAccount(t, accountId));
     const closingBalance = account.balance;
     const openingBalance = roundAmount(closingBalance - periodNet);
 
-    const incomeByCategory = this.buildCategoryBreakdownItems(incomeTxs, totalIncome, INCOME_CATEGORIES);
-    const expenseByCategory = this.buildCategoryBreakdownItems(expenseTxs, totalExpense, EXPENSE_CATEGORIES);
+    const directIncomeTxs = txs.filter((t) => t.type === 'income' && t.accountId === accountId);
+    const directExpenseTxs = txs.filter((t) => t.type === 'expense' && t.accountId === accountId);
+    const transferInTxs = txs.filter((t) => t.type === 'transfer' && t.toAccountId === accountId);
+    const transferOutTxs = txs.filter((t) => t.type === 'transfer' && t.accountId === accountId);
+    const refundTxs = txs.filter((t) => t.type === 'refund' && t.accountId === accountId);
+
+    const incomeByCategory = this.buildCategoryBreakdownItems(directIncomeTxs, sumBy(directIncomeTxs, (t) => t.amount), INCOME_CATEGORIES);
+    const expenseByCategory = this.buildCategoryBreakdownItems(directExpenseTxs, sumBy(directExpenseTxs, (t) => t.amount), EXPENSE_CATEGORIES);
+
+    const transferInTotal = sumBy(transferInTxs, (t) => t.amount);
+    const transferOutTotal = sumBy(transferOutTxs, (t) => t.amount);
+    const refundTotal = sumBy(refundTxs, (t) => t.amount);
 
     return {
       accountId: account.id,
@@ -485,7 +564,12 @@ export class ReportModule {
       netAmount: roundAmount(periodNet),
       incomeByCategory,
       expenseByCategory,
-    };
+      transferInTotal: roundAmount(transferInTotal),
+      transferOutTotal: roundAmount(transferOutTotal),
+      refundTotal: roundAmount(refundTotal),
+      transferInCount: transferInTxs.length,
+      transferOutCount: transferOutTxs.length,
+    } as AccountCashflowSummary;
   }
 
   getGoalDimensionReport(
