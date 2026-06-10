@@ -1,0 +1,30 @@
+{
+  "name": "finance-sdk",
+  "version": "1.0.0",
+  "description": "记账理财类库 SDK - 面向社区互助类应用接入个人目标储蓄功能",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "finance",
+    "accounting",
+    "savings",
+    "sdk",
+    "budget",
+    "goals"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "date-fns": "^3.3.0",
+    "uuid": "^9.0.0"
+  }
+}
