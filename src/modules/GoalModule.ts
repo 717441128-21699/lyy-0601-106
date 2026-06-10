@@ -7,6 +7,8 @@ import {
   GoalProgress,
   GoalContribution,
   GoalStatus,
+  GoalMemberDetail,
+  GoalCardData,
 } from '../types';
 import {
   createBaseEntity,
@@ -58,7 +60,7 @@ export class GoalModule {
       name: input.name.trim(),
       description: input.description,
       targetAmount: roundAmount(input.targetAmount),
-      currentAmount: initialAmount,
+      currentAmount: 0,
       currency: input.currency ?? DEFAULT_CURRENCY,
       deadline: input.deadline,
       startDate: input.startDate ?? now(),
@@ -94,7 +96,7 @@ export class GoalModule {
       });
     }
 
-    return goal;
+    return this.getByIdOrThrow(goal.id);
   }
 
   createSavingsGoal(
@@ -436,5 +438,114 @@ export class GoalModule {
         return (a.deadline ?? Infinity) - (b.deadline ?? Infinity);
       })
       .slice(0, limit);
+  }
+
+  getMemberDetails(goalId: ID, referenceDate: number = now()): GoalMemberDetail[] {
+    const goal = this.getByIdOrThrow(goalId);
+    const contributions = this.storage.goalContributions.get(goalId) ?? [];
+    const positiveContribs = contributions.filter((c) => c.amount > 0);
+
+    const memberMap = new Map<ID, {
+      userId: ID;
+      totalContributed: number;
+      contributionCount: number;
+      lastContributionDate?: number;
+      lastContributionAmount?: number;
+    }>();
+
+    const memberIds = new Set(goal.contributors ?? []);
+    memberIds.add(goal.userId);
+    positiveContribs.forEach((c) => memberIds.add(c.userId));
+
+    memberIds.forEach((uid) => {
+      memberMap.set(uid, {
+        userId: uid,
+        totalContributed: 0,
+        contributionCount: 0,
+      });
+    });
+
+    positiveContribs.forEach((c) => {
+      const member = memberMap.get(c.userId);
+      if (member) {
+        member.totalContributed = roundAmount(member.totalContributed + c.amount);
+        member.contributionCount++;
+        if (!member.lastContributionDate || c.createdAt > member.lastContributionDate) {
+          member.lastContributionDate = c.createdAt;
+          member.lastContributionAmount = c.amount;
+        }
+      }
+    });
+
+    const remainingAmount = Math.max(0, goal.targetAmount - goal.currentAmount);
+    const memberCount = memberMap.size;
+
+    const details: GoalMemberDetail[] = Array.from(memberMap.values())
+      .sort((a, b) => b.totalContributed - a.totalContributed)
+      .map((m, index) => {
+        let remainingShare: number | undefined;
+        let estimatedCompletionDate: number | undefined;
+
+        if (remainingAmount > 0 && goal.status === 'active') {
+          remainingShare = memberCount > 0 ? roundAmount(remainingAmount / memberCount) : remainingAmount;
+          const memberContribs = positiveContribs.filter((c) => c.userId === m.userId);
+          if (memberContribs.length >= 2) {
+            const firstDate = memberContribs[memberContribs.length - 1].createdAt;
+            const totalDays = Math.max(1, daysBetween(firstDate, referenceDate));
+            const avgDaily = m.totalContributed / totalDays;
+            if (avgDaily > 0 && remainingShare > 0) {
+              estimatedCompletionDate = referenceDate + Math.ceil(remainingShare / avgDaily) * MS_PER_DAY;
+            }
+          }
+        }
+
+        return {
+          userId: m.userId,
+          totalContributed: m.totalContributed,
+          contributionCount: m.contributionCount,
+          lastContributionDate: m.lastContributionDate,
+          lastContributionAmount: m.lastContributionAmount,
+          remainingShare,
+          estimatedCompletionDate,
+          rank: index + 1,
+        };
+      });
+
+    return details;
+  }
+
+  getGoalCardData(goalId: ID, referenceDate: number = now()): GoalCardData {
+    const goal = this.getByIdOrThrow(goalId);
+    const progress = this.getProgress(goalId, referenceDate);
+    const memberLeaderboard = this.getMemberDetails(goalId, referenceDate);
+    const recentContributions = this.getRecentContributions(goalId, 5);
+
+    return {
+      goalId: goal.id,
+      name: goal.name,
+      description: goal.description,
+      icon: goal.icon,
+      color: goal.color,
+      category: goal.category,
+      status: goal.status,
+      targetAmount: goal.targetAmount,
+      currentAmount: roundAmount(goal.currentAmount),
+      remainingAmount: progress.remainingAmount,
+      percentage: progress.percentage,
+      deadline: goal.deadline,
+      daysRemaining: progress.daysRemaining,
+      isOnTrack: progress.isOnTrack,
+      dailyRequiredAmount: progress.dailyRequiredAmount,
+      monthlyRequiredAmount: progress.monthlyRequiredAmount,
+      estimatedCompletionDate: progress.estimatedCompletionDate,
+      memberCount: memberLeaderboard.length,
+      memberLeaderboard,
+      recentContributions,
+      currency: goal.currency,
+    };
+  }
+
+  listGoalCards(userId: ID, referenceDate: number = now()): GoalCardData[] {
+    return this.listByUser(userId).map((g) => this.getGoalCardData(g.id, referenceDate));
   }
 }

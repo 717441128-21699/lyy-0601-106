@@ -7,15 +7,7 @@ import {
   ReminderStatus,
   ReminderType,
 } from '../types';
-import {
-  createBaseEntity,
-  now,
-  isBefore,
-  isAfter,
-  addDays,
-  addFrequency,
-  daysBetween,
-} from '../utils';
+import { createBaseEntity, now, roundAmount, isBefore, addDays, addFrequency, daysBetween } from '../utils';
 import { SplitModule } from './SplitModule';
 
 export class ReminderModule {
@@ -134,11 +126,14 @@ export class ReminderModule {
 
     split.participants.forEach((p) => {
       if (p.userId !== split.paidBy && p.status !== 'paid' && p.status !== 'settled') {
+        const remaining = roundAmount(p.amount - p.paidAmount);
+        if (remaining <= 0) return;
+
         const reminder = this.createRepaymentReminder({
           userId: p.userId,
           title: `还款提醒: ${split.name}`,
-          description: `请向 ${split.paidBy} 支付 ¥${p.amount - p.paidAmount}`,
-          amount: p.amount - p.paidAmount,
+          description: `请向 ${split.paidBy} 支付 ¥${remaining}`,
+          amount: remaining,
           currency: split.currency,
           dueDate: split.dueDate ?? addDays(now(), 7).getTime(),
           splitId: split.id,

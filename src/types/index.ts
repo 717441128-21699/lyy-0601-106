@@ -498,6 +498,127 @@ export interface ReportConfig {
   categories?: TransactionCategory[];
 }
 
+export interface GoalMemberDetail {
+  userId: ID;
+  userName?: string;
+  userAvatar?: string;
+  totalContributed: number;
+  contributionCount: number;
+  lastContributionDate?: number;
+  lastContributionAmount?: number;
+  remainingShare?: number;
+  estimatedCompletionDate?: number;
+  rank: number;
+}
+
+export interface GoalCardData {
+  goalId: ID;
+  name: string;
+  description?: string;
+  icon?: string;
+  color?: string;
+  category?: string;
+  status: GoalStatus;
+  targetAmount: number;
+  currentAmount: number;
+  remainingAmount: number;
+  percentage: number;
+  deadline?: number;
+  daysRemaining?: number;
+  isOnTrack: boolean;
+  dailyRequiredAmount?: number;
+  monthlyRequiredAmount?: number;
+  estimatedCompletionDate?: number;
+  memberCount: number;
+  memberLeaderboard: GoalMemberDetail[];
+  recentContributions: GoalContribution[];
+  currency: Currency;
+}
+
+export interface SplitDebtRelation {
+  fromUserId: ID;
+  fromUserName?: string;
+  toUserId: ID;
+  toUserName?: string;
+  amount: number;
+  splitIds: ID[];
+  splitNames: string[];
+}
+
+export interface TransferSuggestion {
+  fromUserId: ID;
+  fromUserName?: string;
+  toUserId: ID;
+  toUserName?: string;
+  amount: number;
+  isConsolidated: boolean;
+  relatedDebts: SplitDebtRelation[];
+}
+
+export interface SplitSettlementSummary {
+  splitId: ID;
+  splitName: string;
+  totalAmount: number;
+  currency: Currency;
+  paidBy: ID;
+  paidByName?: string;
+  status: SplitStatus;
+  debts: SplitDebtRelation[];
+  remainingPerPerson: Array<{
+    userId: ID;
+    userName?: string;
+    totalOwed: number;
+    totalOwedTo: Array<{
+      toUserId: ID;
+      toUserName?: string;
+      amount: number;
+    }>;
+  }>;
+}
+
+export interface UserSettlementSummary {
+  userId: ID;
+  totalOwedByMe: number;
+  totalOwedToMe: number;
+  netBalance: number;
+  debts: SplitDebtRelation[];
+  suggestedTransfers: TransferSuggestion[];
+  perSplitSummaries: SplitSettlementSummary[];
+}
+
+export interface AccountCashflowSummary {
+  accountId: ID;
+  accountName: string;
+  accountType: AccountType;
+  currency: Currency;
+  openingBalance: number;
+  closingBalance: number;
+  totalIncome: number;
+  totalExpense: number;
+  netAmount: number;
+  incomeByCategory: CategoryBreakdownItem[];
+  expenseByCategory: CategoryBreakdownItem[];
+}
+
+export interface GoalDimensionReport {
+  goalId: ID;
+  goalName: string;
+  targetAmount: number;
+  currentAmount: number;
+  percentage: number;
+  contributionsInPeriod: number;
+  contributionCount: number;
+  memberDetails: GoalMemberDetail[];
+  linkedAccountId?: ID;
+  linkedAccountName?: string;
+}
+
+export interface DimensionReport {
+  byAccount: AccountCashflowSummary[];
+  byCategory: CategoryBreakdown;
+  byGoal: GoalDimensionReport[];
+}
+
 export interface StorageAdapter {
   accounts: Map<ID, Account>;
   transactions: Map<ID, Transaction>;

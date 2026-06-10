@@ -11,6 +11,10 @@ import {
   TransactionCategory,
   ID,
   Transaction,
+  AccountCashflowSummary,
+  GoalDimensionReport,
+  DimensionReport,
+  GoalMemberDetail,
 } from '../types';
 import {
   now,
@@ -157,24 +161,31 @@ export class ReportModule {
       config.accountIds
     );
 
+    const currentBalance = this.accounts.getTotalBalance(
+      config.userId,
+      undefined
+    );
+
+    const periodNet = sumBy(txs, (t) => {
+      if (t.type === 'income') return t.amount;
+      if (t.type === 'expense') return -t.amount;
+      if (t.type === 'transfer' && config.accountIds && config.accountIds.length > 0) {
+        const isFrom = config.accountIds.includes(t.accountId);
+        const isTo = t.toAccountId ? config.accountIds.includes(t.toAccountId) : false;
+        if (isFrom && !isTo) return -t.amount;
+        if (!isFrom && isTo) return t.amount;
+        return 0;
+      }
+      return 0;
+    });
+
+    const openingBalance = roundAmount(currentBalance - periodNet);
+
     const points: CashflowPoint[] = [];
     let currentPoint = startDate;
     const step = granularity === 'daily' ? 1 : granularity === 'weekly' ? 7 : 30;
     const stepMs = step * 24 * 60 * 60 * 1000;
-
     let runningBalance = 0;
-    const periodStartTransactions = this.transactions.listInDateRange(
-      config.userId,
-      0,
-      startDate - 1,
-      config.accountIds
-    );
-    runningBalance = sumBy(periodStartTransactions, (t) => {
-      if (t.type === 'income') return t.amount;
-      if (t.type === 'expense') return -t.amount;
-      return 0;
-    });
-    const initialAccountBalance = this.accounts.getTotalBalance(config.userId);
 
     while (currentPoint <= endDate) {
       const periodEnd = currentPoint + stepMs - 1;
@@ -197,9 +208,7 @@ export class ReportModule {
         income: roundAmount(income),
         expense: roundAmount(expense),
         net: roundAmount(income - expense),
-        balance: roundAmount(
-          initialAccountBalance + runningBalance
-        ),
+        balance: roundAmount(openingBalance + runningBalance),
       });
 
       currentPoint += stepMs;
@@ -438,5 +447,103 @@ export class ReportModule {
     const endDate = config.endDate ?? now();
     const startDate = config.startDate ?? addDays(endDate, -30).getTime();
     return { startDate, endDate };
+  }
+
+  getAccountCashflowSummary(
+    userId: ID,
+    accountId: ID,
+    startDate?: number,
+    endDate?: number
+  ): AccountCashflowSummary {
+    const account = this.accounts.getByIdOrThrow(accountId);
+    const end = endDate ?? now();
+    const start = startDate ?? addDays(end, -30).getTime();
+
+    const txs = this.transactions.listInDateRange(userId, start, end, [accountId]);
+    const incomeTxs = txs.filter((t) => t.type === 'income');
+    const expenseTxs = txs.filter((t) => t.type === 'expense');
+
+    const totalIncome = sumBy(incomeTxs, (t) => t.amount);
+    const totalExpense = sumBy(expenseTxs, (t) => t.amount);
+
+    const periodNet = totalIncome - totalExpense;
+    const closingBalance = account.balance;
+    const openingBalance = roundAmount(closingBalance - periodNet);
+
+    const incomeByCategory = this.buildCategoryBreakdownItems(incomeTxs, totalIncome, INCOME_CATEGORIES);
+    const expenseByCategory = this.buildCategoryBreakdownItems(expenseTxs, totalExpense, EXPENSE_CATEGORIES);
+
+    return {
+      accountId: account.id,
+      accountName: account.name,
+      accountType: account.type,
+      currency: account.currency,
+      openingBalance,
+      closingBalance,
+      totalIncome: roundAmount(totalIncome),
+      totalExpense: roundAmount(totalExpense),
+      netAmount: roundAmount(periodNet),
+      incomeByCategory,
+      expenseByCategory,
+    };
+  }
+
+  getGoalDimensionReport(
+    userId: ID,
+    goalId: ID,
+    startDate?: number,
+    endDate?: number
+  ): GoalDimensionReport {
+    const goal = this.goals.getByIdOrThrow(goalId);
+    const end = endDate ?? now();
+    const start = startDate ?? addDays(end, -30).getTime();
+
+    const contributions = this.goals.getContributions(goalId);
+    const inPeriod = contributions.filter(
+      (c) => c.amount > 0 && c.createdAt >= start && c.createdAt <= end
+    );
+    const contributionsInPeriod = roundAmount(sumBy(inPeriod, (c) => c.amount));
+    const memberDetails = this.goals.getMemberDetails(goalId);
+
+    let linkedAccountName: string | undefined;
+    if (goal.linkedAccountId) {
+      const acc = this.accounts.getById(goal.linkedAccountId);
+      linkedAccountName = acc?.name;
+    }
+
+    return {
+      goalId: goal.id,
+      goalName: goal.name,
+      targetAmount: goal.targetAmount,
+      currentAmount: roundAmount(goal.currentAmount),
+      percentage: calculatePercentage(goal.currentAmount, goal.targetAmount),
+      contributionsInPeriod,
+      contributionCount: inPeriod.length,
+      memberDetails,
+      linkedAccountId: goal.linkedAccountId,
+      linkedAccountName,
+    };
+  }
+
+  getDimensionReport(
+    userId: ID,
+    startDate?: number,
+    endDate?: number
+  ): DimensionReport {
+    const end = endDate ?? now();
+    const start = startDate ?? addDays(end, -30).getTime();
+    const config: ReportConfig = { userId, startDate: start, endDate: end };
+
+    const byAccount = this.accounts.listByUserId(userId).map((a) =>
+      this.getAccountCashflowSummary(userId, a.id, start, end)
+    );
+
+    const byCategory = this.getCategoryBreakdown(config);
+
+    const byGoal = this.goals.listByUser(userId).map((g) =>
+      this.getGoalDimensionReport(userId, g.id, start, end)
+    );
+
+    return { byAccount, byCategory, byGoal };
   }
 }

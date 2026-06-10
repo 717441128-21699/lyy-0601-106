@@ -6,6 +6,10 @@ import {
   ID,
   Participant,
   SplitStatus,
+  SplitSettlementSummary,
+  SplitDebtRelation,
+  TransferSuggestion,
+  UserSettlementSummary,
 } from '../types';
 import { createBaseEntity, now, roundAmount } from '../utils';
 import { DEFAULT_CURRENCY } from '../constants';
@@ -72,23 +76,29 @@ export class SplitModule {
 
     participants.forEach((p, index) => {
       let amount = 0;
+      const isLast = index === participants.length - 1;
+
       switch (p.shareType) {
         case 'equal':
-          amount = roundAmount(totalAmount / count);
+          if (isLast) {
+            amount = roundAmount(totalAmount - allocated);
+          } else {
+            amount = roundAmount(totalAmount / count);
+          }
           break;
         case 'percentage':
-          amount = roundAmount(totalAmount * ((p.shareValue ?? 0) / 100));
+          if (isLast) {
+            amount = roundAmount(totalAmount - allocated);
+          } else {
+            amount = roundAmount(totalAmount * ((p.shareValue ?? 0) / 100));
+          }
           break;
         case 'fixed':
           amount = roundAmount(p.shareValue ?? 0);
           break;
       }
 
-      if (index === participants.length - 1) {
-        amount = roundAmount(totalAmount - allocated);
-      } else {
-        allocated += amount;
-      }
+      allocated += amount;
 
       result.push({
         userId: p.userId,
@@ -326,5 +336,188 @@ export class SplitModule {
       }
     });
     return roundAmount(total);
+  }
+
+  getSettlementSummary(splitId: ID): SplitSettlementSummary {
+    const split = this.getByIdOrThrow(splitId);
+    const debts: SplitDebtRelation[] = [];
+
+    split.participants.forEach((p) => {
+      const remaining = roundAmount(p.amount - p.paidAmount);
+      if (remaining > 0 && p.userId !== split.paidBy) {
+        debts.push({
+          fromUserId: p.userId,
+          fromUserName: p.userName,
+          toUserId: split.paidBy,
+          toUserName: split.participants.find((pp) => pp.userId === split.paidBy)?.userName,
+          amount: remaining,
+          splitIds: [split.id],
+          splitNames: [split.name],
+        });
+      }
+    });
+
+    const remainingPerPerson = split.participants
+      .filter((p) => p.userId !== split.paidBy)
+      .map((p) => ({
+        userId: p.userId,
+        userName: p.userName,
+        totalOwed: roundAmount(Math.max(0, p.amount - p.paidAmount)),
+        totalOwedTo: [{
+          toUserId: split.paidBy,
+          toUserName: split.participants.find((pp) => pp.userId === split.paidBy)?.userName,
+          amount: roundAmount(Math.max(0, p.amount - p.paidAmount)),
+        }],
+      }));
+
+    return {
+      splitId: split.id,
+      splitName: split.name,
+      totalAmount: split.totalAmount,
+      currency: split.currency,
+      paidBy: split.paidBy,
+      paidByName: split.participants.find((p) => p.userId === split.paidBy)?.userName,
+      status: split.status,
+      debts,
+      remainingPerPerson,
+    };
+  }
+
+  getUserSettlementSummary(userId: ID): UserSettlementSummary {
+    const allSplits = this.listByUser(userId).filter(
+      (s) => s.status !== 'settled'
+    );
+
+    const debts: SplitDebtRelation[] = [];
+    const perSplitSummaries: SplitSettlementSummary[] = [];
+
+    allSplits.forEach((split) => {
+      const summary = this.getSettlementSummary(split.id);
+      perSplitSummaries.push(summary);
+
+      summary.debts.forEach((debt) => {
+        if (debt.fromUserId === userId || debt.toUserId === userId) {
+          debts.push(debt);
+        }
+      });
+    });
+
+    const suggestedTransfers = this.calculateSuggestedTransfers(userId, allSplits);
+
+    const totalOwedByMe = roundAmount(
+      debts
+        .filter((d) => d.fromUserId === userId)
+        .reduce((sum, d) => sum + d.amount, 0)
+    );
+    const totalOwedToMe = roundAmount(
+      debts
+        .filter((d) => d.toUserId === userId)
+        .reduce((sum, d) => sum + d.amount, 0)
+    );
+
+    return {
+      userId,
+      totalOwedByMe,
+      totalOwedToMe,
+      netBalance: roundAmount(totalOwedToMe - totalOwedByMe),
+      debts,
+      suggestedTransfers,
+      perSplitSummaries,
+    };
+  }
+
+  private calculateSuggestedTransfers(
+    userId: ID,
+    splits: Split[]
+  ): TransferSuggestion[] {
+    const netBalances = new Map<ID, number>();
+    const userNames = new Map<ID, string | undefined>();
+
+    splits.forEach((split) => {
+      split.participants.forEach((p) => {
+        userNames.set(p.userId, p.userName);
+        if (!netBalances.has(p.userId)) netBalances.set(p.userId, 0);
+
+        const remaining = roundAmount(p.amount - p.paidAmount);
+        if (p.userId === split.paidBy) {
+          netBalances.set(p.userId, (netBalances.get(p.userId) ?? 0) + remaining);
+        } else {
+          netBalances.set(p.userId, (netBalances.get(p.userId) ?? 0) - remaining);
+        }
+      });
+    });
+
+    const debtors: Array<{ userId: ID; amount: number }> = [];
+    const creditors: Array<{ userId: ID; amount: number }> = [];
+
+    netBalances.forEach((balance, uid) => {
+      const rounded = roundAmount(balance);
+      if (rounded < -0.01) {
+        debtors.push({ userId: uid, amount: Math.abs(rounded) });
+      } else if (rounded > 0.01) {
+        creditors.push({ userId: uid, amount: rounded });
+      }
+    });
+
+    debtors.sort((a, b) => b.amount - a.amount);
+    creditors.sort((a, b) => b.amount - a.amount);
+
+    const suggestions: TransferSuggestion[] = [];
+    let di = 0;
+    let ci = 0;
+
+    while (di < debtors.length && ci < creditors.length) {
+      const debtor = debtors[di];
+      const creditor = creditors[ci];
+      const transferAmount = roundAmount(Math.min(debtor.amount, creditor.amount));
+
+      if (transferAmount > 0.01) {
+        const relatedDebts: SplitDebtRelation[] = [];
+        splits.forEach((split) => {
+          const debtorP = split.participants.find((p) => p.userId === debtor.userId);
+          const creditorP = split.participants.find((p) => p.userId === creditor.userId);
+          if (debtorP && creditorP && split.paidBy === creditor.userId) {
+            const remaining = roundAmount(debtorP.amount - debtorP.paidAmount);
+            if (remaining > 0.01) {
+              relatedDebts.push({
+                fromUserId: debtor.userId,
+                fromUserName: userNames.get(debtor.userId),
+                toUserId: creditor.userId,
+                toUserName: userNames.get(creditor.userId),
+                amount: Math.min(remaining, transferAmount),
+                splitIds: [split.id],
+                splitNames: [split.name],
+              });
+            }
+          }
+        });
+
+        suggestions.push({
+          fromUserId: debtor.userId,
+          fromUserName: userNames.get(debtor.userId),
+          toUserId: creditor.userId,
+          toUserName: userNames.get(creditor.userId),
+          amount: transferAmount,
+          isConsolidated: relatedDebts.length > 1 || transferAmount !== relatedDebts[0]?.amount,
+          relatedDebts: relatedDebts.length > 0 ? relatedDebts : [{
+            fromUserId: debtor.userId,
+            fromUserName: userNames.get(debtor.userId),
+            toUserId: creditor.userId,
+            toUserName: userNames.get(creditor.userId),
+            amount: transferAmount,
+            splitIds: [],
+            splitNames: [],
+          }],
+        });
+      }
+
+      debtor.amount = roundAmount(debtor.amount - transferAmount);
+      creditor.amount = roundAmount(creditor.amount - transferAmount);
+
+      if (debtor.amount < 0.01) di++;
+      if (creditor.amount < 0.01) ci++;
+    }
+
+    return suggestions;
   }
 }
